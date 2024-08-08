@@ -3,11 +3,11 @@ package main
 import (
 	"io"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/mintance/nginx-clickhouse/clickhouse"
 	configParser "github.com/mintance/nginx-clickhouse/config"
 	"github.com/mintance/nginx-clickhouse/nginx"
@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -34,7 +35,6 @@ var (
 )
 
 func main() {
-
 	// Read config & incoming flags
 	config := configParser.Read()
 
@@ -71,16 +71,15 @@ func main() {
 		logrus.Fatal("Can`t tail logfile: ", err)
 	}
 
+	// Горутрина для обработки и отправки логов в ClickHouse
 	go func() {
 		for {
 			time.Sleep(time.Second * time.Duration(config.Settings.Interval))
 
+			locker.Lock()
 			if len(logs) > 0 {
-
 				logrus.Info("Preparing to save ", len(logs), " new log entries.")
-				locker.Lock()
 				err := clickhouse.Save(config, nginx.ParseLogs(nginxParser, logs))
-
 				if err != nil {
 					logrus.Error("Can`t save logs: ", err)
 					linesNotProcessed.Add(float64(len(logs)))
@@ -88,16 +87,17 @@ func main() {
 					logrus.Info("Saved ", len(logs), " new logs.")
 					linesProcessed.Add(float64(len(logs)))
 				}
-
 				logs = []string{}
-				locker.Unlock()
 			}
+			locker.Unlock()
 		}
 	}()
+	defer logrus.Println(string(debug.Stack()))
 
-	// Push new log entries to array
+	// Основной цикл чтения логов
 	for line := range t.Lines() {
 		locker.Lock()
+		logrus.Info("Read new log line: ", strings.TrimSpace(line.String()))
 		logs = append(logs, strings.TrimSpace(line.String()))
 		locker.Unlock()
 	}
