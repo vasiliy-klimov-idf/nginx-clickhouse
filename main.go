@@ -3,7 +3,6 @@ package main
 import (
 	"io"
 	"net/http"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -71,34 +70,40 @@ func main() {
 		logrus.Fatal("Can`t tail logfile: ", err)
 	}
 
-	// Горутрина для обработки и отправки логов в ClickHouse
-	go func() {
-		for {
-			time.Sleep(time.Second * time.Duration(config.Settings.Interval))
+	for {
+		time.Sleep(time.Second * time.Duration(config.Settings.Interval))
 
-			locker.Lock()
-			if len(logs) > 0 {
-				logrus.Info("Preparing to save ", len(logs), " new log entries.")
-				err := clickhouse.Save(config, nginx.ParseLogs(nginxParser, logs))
-				if err != nil {
-					logrus.Error("Can`t save logs: ", err)
-					linesNotProcessed.Add(float64(len(logs)))
-				} else {
-					logrus.Info("Saved ", len(logs), " new logs.")
-					linesProcessed.Add(float64(len(logs)))
-				}
-				logs = []string{}
+		locker.Lock()
+		if len(logs) > 0 {
+			logrus.Info("Preparing to save ", len(logs), " new log entries.")
+			parsedLogs := nginx.ParseLogs(nginxParser, logs)
+			logs = []string{} // очищаем логи сразу после парсинга
+			locker.Unlock()
+
+			err := clickhouse.Save(config, parsedLogs)
+			if err != nil {
+				logrus.Error("Can't save logs: ", err)
+				linesNotProcessed.Add(float64(len(parsedLogs)))
+			} else {
+				logrus.Info("Saved ", len(parsedLogs), " new logs.")
+				linesProcessed.Add(float64(len(parsedLogs)))
 			}
+		} else {
 			locker.Unlock()
 		}
-	}()
-	defer logrus.Println(string(debug.Stack()))
 
-	// Основной цикл чтения логов
-	for line := range t.Lines() {
-		locker.Lock()
-		logrus.Info("Read new log line: ", strings.TrimSpace(line.String()))
-		logs = append(logs, strings.TrimSpace(line.String()))
-		locker.Unlock()
+		// Чтение новой строки логов
+		line, ok := <-t.Lines()
+		if !ok {
+			break // Завершить цикл, если канал закрыт
+		}
+
+		trimmedLine := strings.TrimSpace(line.String())
+		if trimmedLine != "" {
+			locker.Lock()
+			logrus.Info("Read new log line: ", trimmedLine)
+			logs = append(logs, trimmedLine)
+			locker.Unlock()
+		}
 	}
 }
