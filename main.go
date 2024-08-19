@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/satyrius/gonx"
 	"io"
 	"net/http"
 	"strings"
@@ -35,10 +36,10 @@ var (
 
 func main() {
 
-	// Read config & incoming flags
+	// Читаем конфиг
 	config := configParser.Read()
 
-	// Update config with environment variables if exist
+	// Обновляем конфиг на основе переменных окружения
 	config.SetEnvVariables()
 
 	nginxParser, err := nginx.GetParser(config)
@@ -71,7 +72,7 @@ func main() {
 		logrus.Fatal("Can`t tail logfile: ", err)
 	}
 
-	// Используем time.Ticker вместо time.Sleep
+	// Используем time.Ticker для обработки логов через интервалы
 	ticker := time.NewTicker(time.Second * time.Duration(config.Settings.Interval))
 	defer ticker.Stop()
 
@@ -79,27 +80,34 @@ func main() {
 	for {
 		select {
 		case line := <-t.Lines():
+			// Накопление логов в буфере
 			locker.Lock()
-			logrus.Println(strings.TrimSpace(line.String()))
 			logs = append(logs, strings.TrimSpace(line.String()))
 			locker.Unlock()
+
 		case <-ticker.C:
+			// Обработка всех накопленных логов по таймеру
+			locker.Lock()
 			if len(logs) > 0 {
-				locker.Lock()
-				logrus.Info("Preparing to save ", len(logs), " new log entries.")
-				err := clickhouse.Save(config, nginx.ParseLogs(nginxParser, logs))
-
-				if err != nil {
-					logrus.Error("Can`t save logs: ", err)
-					linesNotProcessed.Add(float64(len(logs)))
-				} else {
-					logrus.Info("Saved ", len(logs), " new logs.")
-					linesProcessed.Add(float64(len(logs)))
-				}
-
-				logs = []string{}
-				locker.Unlock()
+				processLogs(config, nginxParser)
 			}
+			locker.Unlock()
 		}
 	}
+}
+
+func processLogs(config *configParser.Config, nginxParser *gonx.Parser) {
+	logrus.Info("Preparing to save ", len(logs), " new log entries.")
+	err := clickhouse.Save(config, nginx.ParseLogs(nginxParser, logs))
+
+	if err != nil {
+		logrus.Error("Can`t save logs: ", err)
+		linesNotProcessed.Add(float64(len(logs)))
+	} else {
+		logrus.Info("Saved ", len(logs), " new logs.")
+		linesProcessed.Add(float64(len(logs)))
+	}
+
+	// Очистка буфера после обработки
+	logs = []string{}
 }
