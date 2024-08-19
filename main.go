@@ -34,6 +34,7 @@ var (
 )
 
 func main() {
+
 	// Read config & incoming flags
 	config := configParser.Read()
 
@@ -70,40 +71,35 @@ func main() {
 		logrus.Fatal("Can`t tail logfile: ", err)
 	}
 
+	// Используем time.Ticker вместо time.Sleep
+	ticker := time.NewTicker(time.Second * time.Duration(config.Settings.Interval))
+	defer ticker.Stop()
+
+	// Основной цикл обработки логов
 	for {
-		time.Sleep(time.Second * time.Duration(config.Settings.Interval))
-
-		locker.Lock()
-		if len(logs) > 0 {
-			logrus.Info("Preparing to save ", len(logs), " new log entries.")
-			parsedLogs := nginx.ParseLogs(nginxParser, logs)
-			logs = []string{} // очищаем логи сразу после парсинга
-			locker.Unlock()
-
-			err := clickhouse.Save(config, parsedLogs)
-			if err != nil {
-				logrus.Error("Can't save logs: ", err)
-				linesNotProcessed.Add(float64(len(parsedLogs)))
-			} else {
-				logrus.Info("Saved ", len(parsedLogs), " new logs.")
-				linesProcessed.Add(float64(len(parsedLogs)))
-			}
-		} else {
-			locker.Unlock()
-		}
-
-		// Чтение новой строки логов
-		line, ok := <-t.Lines()
-		if !ok {
-			break // Завершить цикл, если канал закрыт
-		}
-
-		trimmedLine := strings.TrimSpace(line.String())
-		if trimmedLine != "" {
+		select {
+		case line := <-t.Lines():
 			locker.Lock()
-			logrus.Info("Read new log line: ", trimmedLine)
-			logs = append(logs, trimmedLine)
+			logrus.Println(strings.TrimSpace(line.String()))
+			logs = append(logs, strings.TrimSpace(line.String()))
 			locker.Unlock()
+		case <-ticker.C:
+			if len(logs) > 0 {
+				locker.Lock()
+				logrus.Info("Preparing to save ", len(logs), " new log entries.")
+				err := clickhouse.Save(config, nginx.ParseLogs(nginxParser, logs))
+
+				if err != nil {
+					logrus.Error("Can`t save logs: ", err)
+					linesNotProcessed.Add(float64(len(logs)))
+				} else {
+					logrus.Info("Saved ", len(logs), " new logs.")
+					linesProcessed.Add(float64(len(logs)))
+				}
+
+				logs = []string{}
+				locker.Unlock()
+			}
 		}
 	}
 }
